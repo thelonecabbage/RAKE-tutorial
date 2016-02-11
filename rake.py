@@ -1,7 +1,7 @@
 # Implementation of RAKE - Rapid Automtic Keyword Exraction algorithm
 # as described in:
-# Rose, S., D. Engel, N. Cramer, and W. Cowley (2010). 
-# Automatic keyword extraction from indi-vidual documents. 
+# Rose, S., D. Engel, N. Cramer, and W. Cowley (2010).
+# Automatic keyword extraction from indi-vidual documents.
 # In M. W. Berry and J. Kogan (Eds.), Text Mining: Applications and Theory.unknown: John Wiley and Sons, Ltd.
 #
 # NOTE: The original code (from https://github.com/aneesha/RAKE)
@@ -12,9 +12,47 @@
 
 import re
 import operator
+import nltk
+import nltk.data
+import string
+import itertools
+
 
 debug = False
 test = False
+
+
+def load_stop_words(stop_word_file):
+    """
+    Utility function to load stop words from a file and return as a list of words
+    @param stop_word_file Path and file name of a file containing stop words.
+    @return list A list of stop words.
+    """
+    stop_words = nltk.corpus.stopwords.words('english')
+    for line in open(stop_word_file):
+        if line.strip()[0:1] != "#":
+            for word in line.split():  # in case more than one per line
+                stop_words.append(word)
+    return set(stop_words)
+
+sent_detector = nltk.data.load('tokenizers/punkt/english.pickle')
+stop_words = load_stop_words('static/stopwords.lst')
+# stop_words = set(nltk.corpus.stopwords.words('english'))
+# with open("static/stopwords.lst", "r") as word_list:
+#     self.stop_words = self.stop_words.union([w.lower().strip() for w in word_list])
+
+
+class Memoize:
+
+    def __init__(self, f):
+        self.f = f
+        self.memo = {}
+
+    def __call__(self, *args):
+        if not args in self.memo:
+            self.memo[args] = self.f(*args)
+        return self.memo[args]
+
 
 def is_number(s):
     try:
@@ -24,18 +62,44 @@ def is_number(s):
         return False
 
 
-def load_stop_words(stop_word_file):
-    """
-    Utility function to load stop words from a file and return as a list of words
-    @param stop_word_file Path and file name of a file containing stop words.
-    @return list A list of stop words.
-    """
-    stop_words = []
-    for line in open(stop_word_file):
-        if line.strip()[0:1] != "#":
-            for word in line.split():  # in case more than one per line
-                stop_words.append(word)
-    return stop_words
+def extract_candidate_chunks(text, max_words_length=5, grammar=r'KT: {(<JJ>* <NN.*>+ <IN>)? <JJ>* <NN.*>+}'):
+    # exclude candidates that are stop words or entirely punctuation
+    global stop_words
+    punct = set(string.punctuation)
+
+    # tokenize, POS-tag, and chunk using regular expressions
+    chunker = nltk.chunk.regexp.RegexpParser(grammar)
+    tagged_sents = nltk.pos_tag_sents(nltk.word_tokenize(
+        sent) for sent in nltk.sent_tokenize(text))
+    all_chunks = list(itertools.chain.from_iterable(nltk.chunk.tree2conlltags(chunker.parse(tagged_sent))
+                                                    for tagged_sent in tagged_sents))
+    # join constituent chunk words into a single chunked phrase
+    candidates = [' '.join(word for word, pos, chunk in group).lower()
+                  for key, group in itertools.groupby(all_chunks, lambda (word, pos, chunk): chunk != 'O') if key]
+
+    return [cand for cand in candidates
+            if cand not in stop_words
+            and not all(char in punct for char in cand)
+            and not len(nltk.word_tokenize(cand)) > max_words_length]
+
+# extract_candidate_chunks = Memoize(extract_candidate_chunks)
+
+
+def extract_candidate_words(text, good_tags=set(['JJ', 'JJR', 'JJS', 'NN', 'NNP', 'NNS', 'NNPS'])):
+    # exclude candidates that are stop words or entirely punctuation
+    global stop_words
+    punct = set(string.punctuation)
+    # stop_words = set(nltk.corpus.stopwords.words('english'))
+    # tokenize and POS-tag words
+    tagged_words = itertools.chain.from_iterable(nltk.pos_tag_sents(nltk.word_tokenize(sent)
+                                                                    for sent in nltk.sent_tokenize(text)))
+    # filter on certain POS tags and lowercase all words
+    candidates = [word.lower() for word, tag in tagged_words
+                  if tag in good_tags and word.lower() not in stop_words
+                  and not all(char in punct for char in word)]
+
+    return candidates
+# extract_candidate_words = Memoize(extract_candidate_words)
 
 
 def separate_words(text, min_word_return_size):
@@ -44,11 +108,13 @@ def separate_words(text, min_word_return_size):
     @param text The text that must be split in to words.
     @param min_word_return_size The minimum no of characters a word must have to be included.
     """
-    splitter = re.compile('[^a-zA-Z0-9_\\+\\-/]')
+    # splitter = re.compile('[^a-zA-Z0-9_\\+\\-/]')
     words = []
-    for single_word in splitter.split(text):
+    # for single_word in splitter.split(text):
+    for single_word in nltk.word_tokenize(text):
         current_word = single_word.strip().lower()
-        #leave numbers in phrase, but don't count as words, since they tend to invalidate scores of their phrases
+        # leave numbers in phrase, but don't count as words, since they tend to
+        # invalidate scores of their phrases
         if len(current_word) > min_word_return_size and current_word != '' and not is_number(current_word):
             words.append(current_word)
     return words
@@ -59,9 +125,12 @@ def split_sentences(text):
     Utility function to return a list of sentences.
     @param text The text that must be split in to sentences.
     """
-    sentence_delimiters = re.compile(u'[\\[\\]\n.!?,;:\t\\-\\"\\(\\)\\\'\u2019\u2013]')
-    sentences = sentence_delimiters.split(text)
-    return sentences
+    global sent_detector
+    return sent_detector.sentences_from_text(text)
+    # sentence_delimiters = re.compile(
+    #     u'[\\[\\]\n.!?,;:\t\\-\\"\\(\\)\\\'\u2019\u2013]')
+    # sentences = sentence_delimiters.split(text)
+    # return sentences
 
 
 def build_stop_word_regex(stop_word_file_path):
@@ -70,7 +139,8 @@ def build_stop_word_regex(stop_word_file_path):
     for word in stop_word_list:
         word_regex = '\\b' + word + '\\b'
         stop_word_regex_list.append(word_regex)
-    stop_word_pattern = re.compile('|'.join(stop_word_regex_list), re.IGNORECASE)
+    stop_word_pattern = re.compile(
+        '|'.join(stop_word_regex_list), re.IGNORECASE)
     return stop_word_pattern
 
 
@@ -115,20 +185,21 @@ def is_acceptable(phrase, min_char_length, max_words_length):
     return 1
 
 
-def calculate_word_scores(phraseList):
+def calculate_word_scores(phraseList, min_char_length=0):
     word_frequency = {}
     word_degree = {}
+    global stop_words
     for phrase in phraseList:
-        word_list = separate_words(phrase, 0)
+        word_list = separate_words(phrase, min_char_length)
         word_list_length = len(word_list)
         word_list_degree = word_list_length - 1
-        #if word_list_degree > 3: word_list_degree = 3 #exp.
+        # if word_list_degree > 3: word_list_degree = 3 #exp.
         for word in word_list:
             word_frequency.setdefault(word, 0)
             word_frequency[word] += 1
             word_degree.setdefault(word, 0)
-            word_degree[word] += word_list_degree  #orig.
-            #word_degree[word] += 1/(word_list_length*1.0) #exp.
+            word_degree[word] += word_list_degree  # orig.
+            # word_degree[word] += 1/(word_list_length*1.0) #exp.
     for item in word_frequency:
         word_degree[item] = word_degree[item] + word_frequency[item]
 
@@ -136,12 +207,16 @@ def calculate_word_scores(phraseList):
     word_score = {}
     for item in word_frequency:
         word_score.setdefault(item, 0)
-        word_score[item] = word_degree[item] / (word_frequency[item] * 1.0)  #orig.
-    #word_score[item] = word_frequency[item]/(word_degree[item] * 1.0) #exp.
+        # orig.
+        if item.lower() in stop_words:
+            word_score[item] = 0
+        else:
+            word_score[item] = word_degree[item] / (word_frequency[item] * 1.0)
+    # word_score[item] = word_frequency[item]/(word_degree[item] * 1.0) #exp.
     return word_score
 
 
-def generate_candidate_keyword_scores(phrase_list, word_score, min_keyword_frequency=1):
+def generate_candidate_keyword_scores(phrase_list, word_score, min_keyword_frequency=1, min_char_length=0):
     keyword_candidates = {}
 
     for phrase in phrase_list:
@@ -149,7 +224,7 @@ def generate_candidate_keyword_scores(phrase_list, word_score, min_keyword_frequ
             if phrase_list.count(phrase) < min_keyword_frequency:
                 continue
         keyword_candidates.setdefault(phrase, 0)
-        word_list = separate_words(phrase, 0)
+        word_list = separate_words(phrase, min_char_length)
         candidate_score = 0
         for word in word_list:
             candidate_score += word_score[word]
@@ -158,6 +233,7 @@ def generate_candidate_keyword_scores(phrase_list, word_score, min_keyword_frequ
 
 
 class Rake(object):
+
     def __init__(self, stop_words_path, min_char_length=1, max_words_length=5, min_keyword_frequency=1):
         self.__stop_words_path = stop_words_path
         self.__stop_words_pattern = build_stop_word_regex(stop_words_path)
@@ -168,14 +244,44 @@ class Rake(object):
     def run(self, text):
         sentence_list = split_sentences(text)
 
-        phrase_list = generate_candidate_keywords(sentence_list, self.__stop_words_pattern, self.__min_char_length, self.__max_words_length)
+        # phrase_list = generate_candidate_keywords(
+        # sentence_list, self.__stop_words_pattern, self.__min_char_length,
+        # self.__max_words_length)
 
-        word_scores = calculate_word_scores(phrase_list)
+        phrase_list = extract_candidate_chunks(text, self.__max_words_length)
 
-        keyword_candidates = generate_candidate_keyword_scores(phrase_list, word_scores, self.__min_keyword_frequency)
+        word_scores = calculate_word_scores(
+            phrase_list, self.__min_char_length)
+        # word_scores = calculate_word_scores(sentence_list, self.__min_char_length)
 
-        sorted_keywords = sorted(keyword_candidates.iteritems(), key=operator.itemgetter(1), reverse=True)
+        keyword_candidates = generate_candidate_keyword_scores(
+            phrase_list, word_scores, self.__min_keyword_frequency, self.__min_char_length)
+
+        # import ipdb; ipdb.set_trace()
+
+        sorted_keywords = sorted(keyword_candidates.iteritems(
+        ), key=operator.itemgetter(1), reverse=True)
         return sorted_keywords
+
+    def summaries(self, text, keywords=[]):
+        sentence_list = [[sent, 0] for sent in split_sentences(text)]
+        keywords = [k.lower() for k in keywords]
+        kw_scores = {}
+        for kw in self.run(text):
+            if not keywords or kw[0] in keywords:
+                kw_scores[kw[0]] = (kw[0], kw[1] or 1)
+        for kw in list(set(keywords) - set(kw_scores.keys())):
+            kw_scores[kw] = (kw, 1)
+
+        print kw_scores.values()
+
+        for sent in sentence_list:
+            for kw, score in kw_scores.values():
+                sent[1] += score if sent[0].find(kw) >= 0 else 0
+            sent[1] /= len(nltk.word_tokenize(sent[0]))
+
+        sentence_list.sort(key=operator.itemgetter(1), reverse=True)
+        return sentence_list
 
 
 if test:
@@ -183,8 +289,12 @@ if test:
 
     # Split text into sentences
     sentenceList = split_sentences(text)
-    #stoppath = "FoxStoplist.txt" #Fox stoplist contains "numbers", so it will not find "natural numbers" like in Table 1.1
-    stoppath = "RAKE/SmartStoplist.txt"  #SMART stoplist misses some of the lower-scoring keywords in Figure 1.5, which means that the top 1/3 cuts off one of the 4.0 score words in Table 1.1
+    # stoppath = "FoxStoplist.txt" #Fox stoplist contains "numbers", so it
+    # will not find "natural numbers" like in Table 1.1
+    # SMART stoplist misses some of the lower-scoring keywords in Figure 1.5,
+    # which means that the top 1/3 cuts off one of the 4.0 score words in
+    # Table 1.1
+    stoppath = "RAKE/SmartStoplist.txt"
     stopwordpattern = build_stop_word_regex(stoppath)
 
     # generate candidate keywords
@@ -194,16 +304,22 @@ if test:
     wordscores = calculate_word_scores(phraseList)
 
     # generate candidate keyword scores
-    keywordcandidates = generate_candidate_keyword_scores(phraseList, wordscores)
-    if debug: print keywordcandidates
+    keywordcandidates = generate_candidate_keyword_scores(
+        phraseList, wordscores)
+    if debug:
+        print keywordcandidates
 
-    sortedKeywords = sorted(keywordcandidates.iteritems(), key=operator.itemgetter(1), reverse=True)
-    if debug: print sortedKeywords
+    sortedKeywords = sorted(keywordcandidates.iteritems(),
+                            key=operator.itemgetter(1), reverse=True)
+    if debug:
+        print sortedKeywords
 
     totalKeywords = len(sortedKeywords)
-    if debug: print totalKeywords
+    if debug:
+        print totalKeywords
     print sortedKeywords[0:(totalKeywords / 3)]
 
     rake = Rake("SmartStoplist.txt")
     keywords = rake.run(text)
     print keywords
+# [l[i:i+len(pat)]==pat for i in xrange(len(l)-len(pat)+1)].count(True)
