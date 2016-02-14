@@ -14,9 +14,10 @@ import re
 import operator
 import nltk
 import nltk.data
+from nltk import stem
 import string
 import itertools
-
+import collections
 
 debug = False
 test = False
@@ -36,7 +37,8 @@ def load_stop_words(stop_word_file):
     return set(stop_words)
 
 sent_detector = nltk.data.load('tokenizers/punkt/english.pickle')
-stop_words = load_stop_words('static/stopwords.lst')
+stop_words = []
+stemmer = stem.lancaster.LancasterStemmer()
 # stop_words = set(nltk.corpus.stopwords.words('english'))
 # with open("static/stopwords.lst", "r") as word_list:
 #     self.stop_words = self.stop_words.union([w.lower().strip() for w in word_list])
@@ -188,17 +190,19 @@ def is_acceptable(phrase, min_char_length, max_words_length):
 def calculate_word_scores(phraseList, min_char_length=0):
     word_frequency = {}
     word_degree = {}
-    global stop_words
+    word_stem = {}
+    global stop_words, stemmer
     for phrase in phraseList:
         word_list = separate_words(phrase, min_char_length)
         word_list_length = len(word_list)
         word_list_degree = word_list_length - 1
         # if word_list_degree > 3: word_list_degree = 3 #exp.
         for word in word_list:
-            word_frequency.setdefault(word, 0)
-            word_frequency[word] += 1
-            word_degree.setdefault(word, 0)
-            word_degree[word] += word_list_degree  # orig.
+            stem = stemmer.stem(word.lower())
+            word_frequency.setdefault(stem, 0)
+            word_frequency[stem] += 1
+            word_degree.setdefault(stem, 0)
+            word_degree[stem] += word_list_degree  # orig.
             # word_degree[word] += 1/(word_list_length*1.0) #exp.
     for item in word_frequency:
         word_degree[item] = word_degree[item] + word_frequency[item]
@@ -223,19 +227,25 @@ def generate_candidate_keyword_scores(phrase_list, word_score, min_keyword_frequ
         if min_keyword_frequency > 1:
             if phrase_list.count(phrase) < min_keyword_frequency:
                 continue
-        keyword_candidates.setdefault(phrase, 0)
-        word_list = separate_words(phrase, min_char_length)
+        keyword_candidates.setdefault(phrase, (0, phrase))
+        word_list = [stemmer.stem(w.lower())
+                     for w in separate_words(phrase, min_char_length)]
         candidate_score = 0
         for word in word_list:
-            candidate_score += word_score[word]
-        keyword_candidates[phrase] = candidate_score
+            try:
+                candidate_score += word_score[word]
+            except KeyError:
+                pass
+        keyword_candidates[' '.join(word_list)] = (candidate_score, phrase)
     return keyword_candidates
 
 
 class Rake(object):
 
     def __init__(self, stop_words_path, min_char_length=1, max_words_length=5, min_keyword_frequency=1):
+        global stop_words
         self.__stop_words_path = stop_words_path
+        stop_words = load_stop_words(stop_words_path)
         self.__stop_words_pattern = build_stop_word_regex(stop_words_path)
         self.__min_char_length = min_char_length
         self.__max_words_length = max_words_length
@@ -257,35 +267,51 @@ class Rake(object):
         keyword_candidates = generate_candidate_keyword_scores(
             phrase_list, word_scores, self.__min_keyword_frequency, self.__min_char_length)
 
-        # import ipdb; ipdb.set_trace()
-
         sorted_keywords = sorted(keyword_candidates.iteritems(
         ), key=operator.itemgetter(1), reverse=True)
         return sorted_keywords
 
-    def summaries(self, text, keywords=[]):
-        sentence_list = [[sent, 0] for sent in split_sentences(text)]
-        keywords = [k.lower() for k in keywords]
-        kw_scores = {}
-        for kw in self.run(text):
-            if not keywords or kw[0] in keywords:
-                kw_scores[kw[0]] = (kw[0], kw[1] or 1)
-        for kw in list(set(keywords) - set(kw_scores.keys())):
-            kw_scores[kw] = (kw, 1)
+    def summaries(self, text, phrase_list=[], max_word_length=40):
+        global stemmer
+        sentence_list = split_sentences(text)
+        if not phrase_list:
+            phrase_list = extract_candidate_chunks(
+                text, self.__max_words_length)
+        phrase_list = [k.lower() for k in phrase_list]
 
-        print kw_scores.values()
+        word_scores = calculate_word_scores(
+            sentence_list, self.__min_char_length)
+        keyword_candidates = generate_candidate_keyword_scores(
+            phrase_list, word_scores, self.__min_keyword_frequency, self.__min_char_length)
 
+        scored_sentence_list = []
         for sent in sentence_list:
-            for kw, score in kw_scores.values():
-                sent[1] += score if sent[0].find(kw) >= 0 else 0
-            sent[1] /= len(nltk.word_tokenize(sent[0]))
+            score = 0
+            stem_went_words = [stemmer.stem(w.lower())
+                               for w in nltk.word_tokenize(sent)]
+            if len(stem_went_words) > max_word_length:
+                continue
+            stem_sent = ' '.join(stem_went_words)
+            kw_list = []
+            for stem_kw in keyword_candidates:
+                score += keyword_candidates[stem_kw][0] * \
+                    stem_sent.count(stem_kw)
+                if stem_sent.count(stem_kw):
+                    kw_list.append((stem_kw, keyword_candidates[stem_kw][0]))
+            score /= (len(stem_went_words) / (len(kw_list) or 1))
+            scored_sentence_list.append((sent, score))
 
-        sentence_list.sort(key=operator.itemgetter(1), reverse=True)
-        return sentence_list
+        return sorted(scored_sentence_list, key=operator.itemgetter(1), reverse=True)
 
 
 if test:
-    text = "Compatibility of systems of linear constraints over the set of natural numbers. Criteria of compatibility of a system of linear Diophantine equations, strict inequations, and nonstrict inequations are considered. Upper bounds for components of a minimal set of solutions and algorithms of construction of minimal generating sets of solutions for all types of systems are given. These criteria and the corresponding algorithms for constructing a minimal supporting set of solutions can be used in solving all the considered types of systems and systems of mixed types."
+    text = ("Compatibility of systems of linear constraints over the set of natural numbers. " +
+            "Criteria of compatibility of a system of linear Diophantine equations, strict inequations, " +
+            "and nonstrict inequations are considered. Upper bounds for components of a minimal set of " +
+            "solutions and algorithms of construction of minimal generating sets of solutions for all " +
+            "types of systems are given. These criteria and the corresponding algorithms for constructing " +
+            "a minimal supporting set of solutions can be used in solving all the considered types of systems " +
+            "and systems of mixed types.")
 
     # Split text into sentences
     sentenceList = split_sentences(text)
